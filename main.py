@@ -4,12 +4,14 @@ from discord.ext import commands
 from flask import Flask
 import asyncio
 from dotenv import load_dotenv
+from motor.motor_asyncio import AsyncIOMotorClient  # MongoDB
 
 # Carregar variáveis do .env
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 AUTOPING = os.getenv("AUTOPING")
+MONGO_URL = os.getenv("MONGO_URL")  # URL de conexão MongoDB Atlas
 
 # Intents e prefixo
 intents = discord.Intents.all()
@@ -33,10 +35,14 @@ async def auto_ping():
             print(f"[AutoPing] Erro ao enviar ping: {e}")
         await asyncio.sleep(300)  # 5 minutos
 
-# Bot customizado com setup_hook
+# Bot customizado com conexão ao Mongo e setup_hook
 class CustomBot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.db_client = AsyncIOMotorClient(MONGO_URL)
+        self.db = self.db_client["natanbot"]  # Nome do banco de dados
+
     async def setup_hook(self):
-        # Carregar todos os cogs da pasta /cogs
         for filename in os.listdir("./cogs"):
             if filename.endswith(".py"):
                 try:
@@ -45,16 +51,13 @@ class CustomBot(commands.Bot):
                 except Exception as e:
                     print(f"[ERRO] Ao carregar {filename}: {e}")
 
-        # Iniciar auto-ping
         self.loop.create_task(auto_ping())
 
 # Instância do bot
 bot = CustomBot(command_prefix="!", intents=intents)
 
-# Iniciar Flask em uma thread separada
+# Iniciar Flask + Bot
 if __name__ == "__main__":
     import threading
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
-
-    # Iniciar bot
     asyncio.run(bot.start(TOKEN))
