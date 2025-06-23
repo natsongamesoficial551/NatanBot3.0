@@ -39,7 +39,7 @@ async def auto_ping():
 class CustomBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.db_client = AsyncIOMotorClient(MONGO_URL)
+        self.db_client = AsyncIOMotorClient(MONGO_URL, tls=True, tlsAllowInvalidCertificates=True)
         self.db = self.db_client["natanbot"]  # Nome do banco de dados
 
     async def setup_hook(self):
