@@ -1,36 +1,118 @@
 import discord
 from discord.ext import commands
-import json
 import os
 import random
 from datetime import datetime
+from motor.motor_asyncio import AsyncIOMotorClient
+import asyncio
 
 class Sorteio(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.data_file = "sorteios.json"
-        self.load_data()
+        self.client = None
+        self.db = None
+        self.sorteios_collection = None
+        self.configuracoes_collection = None
+        self._connection_ready = False
+        # Inicializa a conexão com MongoDB
+        self.bot.loop.create_task(self.init_database())
     
-    def load_data(self):
-        """Carrega dados do arquivo JSON ou cria um novo se não existir"""
-        if os.path.exists(self.data_file):
-            with open(self.data_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                self.sorteios = data.get('sorteios', {})
-                self.configuracoes = data.get('configuracoes', {})
-        else:
-            self.sorteios = {}
-            self.configuracoes = {}
-            self.save_data()
+    async def init_database(self):
+        """Inicializa a conexão com MongoDB"""
+        try:
+            # URL de conexão do MongoDB (vem de variável de ambiente)
+            mongo_uri = os.getenv("MONGO_URI") or os.getenv('MONGODB_URL', 'mongodb://localhost:27017/')
+            
+            if not mongo_uri:
+                print("❌ MONGO_URI não encontrada nas variáveis de ambiente!")
+                return
+            
+            print("🔄 Conectando ao MongoDB (Sorteios)...")
+            self.client = AsyncIOMotorClient(mongo_uri)
+            
+            # Testa a conexão
+            await self.client.admin.command('ping')
+            
+            self.db = self.client['discord_bot']
+            self.sorteios_collection = self.db['sorteios']
+            self.configuracoes_collection = self.db['configuracoes']
+            self._connection_ready = True
+            
+            print("✅ Conectado ao MongoDB (Sorteios) com sucesso!")
+            
+        except Exception as e:
+            print(f"❌ Erro ao conectar com MongoDB (Sorteios): {e}")
+            self._connection_ready = False
+
+    async def ensure_connection(self):
+        """Garante que a conexão com MongoDB está ativa"""
+        if not self._connection_ready:
+            await self.init_database()
+        return self._connection_ready
     
-    def save_data(self):
-        """Salva dados no arquivo JSON"""
-        data = {
-            'sorteios': self.sorteios,
-            'configuracoes': self.configuracoes
-        }
-        with open(self.data_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+    async def get_sorteio(self, guild_id):
+        """Busca sorteio do servidor no MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                return None
+            return await self.sorteios_collection.find_one({'guild_id': str(guild_id)})
+        except Exception as e:
+            print(f"❌ Erro ao buscar sorteio: {e}")
+            return None
+    
+    async def save_sorteio(self, guild_id, data):
+        """Salva ou atualiza sorteio no MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                return False
+            data['guild_id'] = str(guild_id)
+            await self.sorteios_collection.replace_one(
+                {'guild_id': str(guild_id)}, 
+                data, 
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            print(f"❌ Erro ao salvar sorteio: {e}")
+            return False
+    
+    async def delete_sorteio(self, guild_id):
+        """Remove sorteio do MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                return False
+            await self.sorteios_collection.delete_one({'guild_id': str(guild_id)})
+            return True
+        except Exception as e:
+            print(f"❌ Erro ao deletar sorteio: {e}")
+            return False
+    
+    async def get_configuracao(self, guild_id):
+        """Busca configuração do servidor no MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                return {}
+            config = await self.configuracoes_collection.find_one({'guild_id': str(guild_id)})
+            return config if config else {}
+        except Exception as e:
+            print(f"❌ Erro ao buscar configuração: {e}")
+            return {}
+    
+    async def save_configuracao(self, guild_id, data):
+        """Salva ou atualiza configuração no MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                return False
+            data['guild_id'] = str(guild_id)
+            await self.configuracoes_collection.replace_one(
+                {'guild_id': str(guild_id)}, 
+                data, 
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            print(f"❌ Erro ao salvar configuração: {e}")
+            return False
     
     @commands.command(name='comecarsorteio', aliases=['startgw'])
     @commands.has_permissions(administrator=True)
@@ -48,7 +130,8 @@ class Sorteio(commands.Cog):
             return
         
         # Verifica se já existe um sorteio ativo
-        if guild_id in self.sorteios and self.sorteios[guild_id].get('ativo'):
+        sorteio_ativo = await self.get_sorteio(guild_id)
+        if sorteio_ativo and sorteio_ativo.get('ativo'):
             embed = discord.Embed(
                 title="⚠️ Sorteio Já Ativo",
                 description="Já existe um sorteio em andamento.\nUse `!encerrarsorteio` para encerrar antes de começar outro.",
@@ -58,7 +141,7 @@ class Sorteio(commands.Cog):
             return
         
         # Verifica se os canais estão configurados
-        configs = self.configuracoes.get(guild_id, {})
+        configs = await self.get_configuracao(guild_id)
         canal_sorteio_id = configs.get('canal_sorteio')
         canal_comando_id = configs.get('canal_comando')
         
@@ -83,7 +166,7 @@ class Sorteio(commands.Cog):
             return
         
         # Cria o sorteio
-        self.sorteios[guild_id] = {
+        sorteio_data = {
             'premio': premio,
             'ativo': True,
             'participantes': [],
@@ -91,7 +174,6 @@ class Sorteio(commands.Cog):
             'criador_id': ctx.author.id,
             'data_inicio': datetime.now().strftime('%d/%m/%Y %H:%M')
         }
-        self.save_data()
         
         # Envia mensagem no canal do sorteio
         canal_sorteio = self.bot.get_channel(canal_sorteio_id)
@@ -107,8 +189,9 @@ class Sorteio(commands.Cog):
             await msg.add_reaction('🎁')
             
             # Salva ID da mensagem
-            self.sorteios[guild_id]['mensagem_id'] = msg.id
-            self.save_data()
+            sorteio_data['mensagem_id'] = msg.id
+        
+        await self.save_sorteio(guild_id, sorteio_data)
         
         # Confirmação no canal de comando
         embed = discord.Embed(
@@ -124,7 +207,8 @@ class Sorteio(commands.Cog):
         """Sorteia um vencedor do sorteio ativo"""
         guild_id = str(ctx.guild.id)
         
-        if guild_id not in self.sorteios or not self.sorteios[guild_id].get('ativo'):
+        sorteio = await self.get_sorteio(guild_id)
+        if not sorteio or not sorteio.get('ativo'):
             embed = discord.Embed(
                 title="❌ Nenhum Sorteio Ativo",
                 description="Não há sorteio em andamento.\nUse `!comecarsorteio <prêmio>` para iniciar um.",
@@ -134,7 +218,7 @@ class Sorteio(commands.Cog):
             return
         
         # Verifica canal de comando
-        configs = self.configuracoes.get(guild_id, {})
+        configs = await self.get_configuracao(guild_id)
         canal_comando_id = configs.get('canal_comando')
         
         if canal_comando_id and ctx.channel.id != canal_comando_id:
@@ -161,7 +245,7 @@ class Sorteio(commands.Cog):
             return
         
         try:
-            msg_id = self.sorteios[guild_id].get('mensagem_id')
+            msg_id = sorteio.get('mensagem_id')
             if msg_id:
                 msg = await canal_sorteio.fetch_message(msg_id)
                 participantes = []
@@ -188,7 +272,7 @@ class Sorteio(commands.Cog):
         
         # Sorteia vencedor
         vencedor = random.choice(participantes)
-        premio = self.sorteios[guild_id]['premio']
+        premio = sorteio['premio']
         
         # Anuncia no canal do sorteio
         embed_vencedor = discord.Embed(
@@ -214,7 +298,8 @@ class Sorteio(commands.Cog):
         """Encerra o sorteio ativo"""
         guild_id = str(ctx.guild.id)
         
-        if guild_id not in self.sorteios or not self.sorteios[guild_id].get('ativo'):
+        sorteio = await self.get_sorteio(guild_id)
+        if not sorteio or not sorteio.get('ativo'):
             embed = discord.Embed(
                 title="❌ Nenhum Sorteio Ativo",
                 description="Não há sorteio em andamento para encerrar.",
@@ -224,7 +309,7 @@ class Sorteio(commands.Cog):
             return
         
         # Verifica canal de comando
-        configs = self.configuracoes.get(guild_id, {})
+        configs = await self.get_configuracao(guild_id)
         canal_comando_id = configs.get('canal_comando')
         
         if canal_comando_id and ctx.channel.id != canal_comando_id:
@@ -238,11 +323,12 @@ class Sorteio(commands.Cog):
             return
         
         # Encerra o sorteio
-        premio = self.sorteios[guild_id]['premio']
-        self.sorteios[guild_id]['ativo'] = False
-        self.save_data()
+        premio = sorteio['premio']
+        sorteio['ativo'] = False
+        await self.save_sorteio(guild_id, sorteio)
         
         # Anuncia encerramento no canal do sorteio
+        configs = await self.get_configuracao(guild_id)
         canal_sorteio_id = configs.get('canal_sorteio')
         canal_sorteio = self.bot.get_channel(canal_sorteio_id)
         
@@ -268,17 +354,22 @@ class Sorteio(commands.Cog):
         """Define o canal onde os comandos de sorteio podem ser usados"""
         guild_id = str(ctx.guild.id)
         
-        if guild_id not in self.configuracoes:
-            self.configuracoes[guild_id] = {}
+        configs = await self.get_configuracao(guild_id)
+        configs['canal_comando'] = canal.id
+        success = await self.save_configuracao(guild_id, configs)
         
-        self.configuracoes[guild_id]['canal_comando'] = canal.id
-        self.save_data()
-        
-        embed = discord.Embed(
-            title="✅ Canal de Comando Definido",
-            description=f"Os comandos de sorteio agora só podem ser usados em {canal.mention}",
-            color=0x00ff7f
-        )
+        if success:
+            embed = discord.Embed(
+                title="✅ Canal de Comando Definido",
+                description=f"Os comandos de sorteio agora só podem ser usados em {canal.mention}",
+                color=0x00ff7f
+            )
+        else:
+            embed = discord.Embed(
+                title="❌ Erro",
+                description="Não foi possível salvar a configuração. Verifique a conexão com o banco de dados.",
+                color=0xff4444
+            )
         await ctx.send(embed=embed)
     
     @commands.command(name='canaldosorteio', aliases=['gwchannel'])
@@ -287,17 +378,22 @@ class Sorteio(commands.Cog):
         """Define o canal onde os sorteios serão realizados"""
         guild_id = str(ctx.guild.id)
         
-        if guild_id not in self.configuracoes:
-            self.configuracoes[guild_id] = {}
+        configs = await self.get_configuracao(guild_id)
+        configs['canal_sorteio'] = canal.id
+        success = await self.save_configuracao(guild_id, configs)
         
-        self.configuracoes[guild_id]['canal_sorteio'] = canal.id
-        self.save_data()
-        
-        embed = discord.Embed(
-            title="✅ Canal do Sorteio Definido",
-            description=f"Os sorteios serão realizados em {canal.mention}",
-            color=0x00ff7f
-        )
+        if success:
+            embed = discord.Embed(
+                title="✅ Canal do Sorteio Definido",
+                description=f"Os sorteios serão realizados em {canal.mention}",
+                color=0x00ff7f
+            )
+        else:
+            embed = discord.Embed(
+                title="❌ Erro",
+                description="Não foi possível salvar a configuração. Verifique a conexão com o banco de dados.",
+                color=0xff4444
+            )
         await ctx.send(embed=embed)
     
     @commands.Cog.listener()
@@ -310,6 +406,12 @@ class Sorteio(commands.Cog):
                 color=0xff4444
             )
             await ctx.send(embed=embed)
+
+    async def cog_unload(self):
+        """Fecha a conexão com MongoDB quando o cog é descarregado"""
+        if self.client:
+            self.client.close()
+            print("🔌 Conexão com MongoDB (Sorteios) fechada")
 
 async def setup(bot):
     await bot.add_cog(Sorteio(bot))

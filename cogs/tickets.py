@@ -1,37 +1,91 @@
 import discord
 from discord.ext import commands
-import json
+import asyncio
+from motor.motor_asyncio import AsyncIOMotorClient
 import os
 
 class TicketSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config_file = "ticket_config.json"
-        self.config = self.load_config()
+        self.client = None
+        self.db = None
+        self.collection = None
+        self._connection_ready = False
+        # Inicializa a conexão com MongoDB
+        self.bot.loop.create_task(self.init_database())
 
-    def load_config(self):
-        if os.path.exists(self.config_file):
-            with open(self.config_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
+    async def init_database(self):
+        """Inicializa a conexão com MongoDB"""
+        try:
+            # URL de conexão do MongoDB (vem de variável de ambiente)
+            mongo_uri = os.getenv("MONGO_URI")
+            
+            if not mongo_uri:
+                print("❌ MONGO_URI não encontrada nas variáveis de ambiente!")
+                return
+            
+            print("🔄 Conectando ao MongoDB...")
+            self.client = AsyncIOMotorClient(mongo_uri)
+            
+            # Testa a conexão
+            await self.client.admin.command('ping')
+            
+            self.db = self.client['discord_bot']
+            self.collection = self.db['ticket_config']
+            self._connection_ready = True
+            
+            print("✅ Conectado ao MongoDB com sucesso!")
+            
+        except Exception as e:
+            print(f"❌ Erro ao conectar com MongoDB: {e}")
+            self._connection_ready = False
 
-    def save_config(self):
-        with open(self.config_file, 'w', encoding='utf-8') as f:
-            json.dump(self.config, f, indent=4, ensure_ascii=False)
+    async def ensure_connection(self):
+        """Garante que a conexão com MongoDB está ativa"""
+        if not self._connection_ready:
+            await self.init_database()
+        return self._connection_ready
 
-    def get_guild_config(self, guild_id):
-        return self.config.get(str(guild_id), {})
+    async def get_guild_config(self, guild_id):
+        """Obtém a configuração de um servidor específico do MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                print("❌ Conexão com MongoDB não está disponível")
+                return {}
+                
+            config = await self.collection.find_one({"guild_id": str(guild_id)})
+            return config.get('config', {}) if config else {}
+            
+        except Exception as e:
+            print(f"❌ Erro ao buscar configuração: {e}")
+            return {}
 
-    def set_guild_config(self, guild_id, key, value):
-        guild_id = str(guild_id)
-        if guild_id not in self.config:
-            self.config[guild_id] = {}
-        self.config[guild_id][key] = value
-        self.save_config()
+    async def set_guild_config(self, guild_id, key, value):
+        """Define uma configuração para um servidor específico no MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                print("❌ Conexão com MongoDB não está disponível")
+                return False
+            
+            guild_id = str(guild_id)
+            
+            # Usa upsert para criar ou atualizar
+            await self.collection.update_one(
+                {"guild_id": guild_id},
+                {"$set": {f"config.{key}": value}},
+                upsert=True
+            )
+            
+            print(f"✅ Configuração salva: {key} = {value} para guild {guild_id}")
+            return True
+                
+        except Exception as e:
+            print(f"❌ Erro ao salvar configuração: {e}")
+            return False
 
     @commands.command(name='ticket')
     async def ticket(self, ctx):
-        config = self.get_guild_config(ctx.guild.id)
+        config = await self.get_guild_config(ctx.guild.id)
         canal_comando = config.get('canal_comando')
         categoria_ticket = config.get('categoria_ticket')
 
@@ -137,7 +191,6 @@ class TicketSystem(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-        import asyncio
         await asyncio.sleep(5)
         await ctx.channel.delete()
 
@@ -154,29 +207,45 @@ class TicketSystem(commands.Cog):
             await ctx.send(embed=embed)
             return
 
-        self.set_guild_config(ctx.guild.id, 'categoria_ticket', categoria_id)
-        embed = discord.Embed(
-            title="✅ Categoria de Ticket Definida",
-            description=f"Categoria configurada para: {categoria.name}",
-            color=discord.Color.green()
-        )
+        success = await self.set_guild_config(ctx.guild.id, 'categoria_ticket', categoria_id)
+        
+        if success:
+            embed = discord.Embed(
+                title="✅ Categoria de Ticket Definida",
+                description=f"Categoria configurada para: {categoria.name}",
+                color=discord.Color.green()
+            )
+        else:
+            embed = discord.Embed(
+                title="❌ Erro",
+                description="Não foi possível salvar a configuração.",
+                color=discord.Color.red()
+            )
         await ctx.send(embed=embed)
 
     @commands.command(name='canaldecomandoticket')
     @commands.has_permissions(administrator=True)
     async def canal_de_comando_ticket(self, ctx, canal: discord.TextChannel):
-        self.set_guild_config(ctx.guild.id, 'canal_comando', canal.id)
-        embed = discord.Embed(
-            title="✅ Canal de Comando Definido",
-            description=f"Canal de comandos configurado para: {canal.mention}",
-            color=discord.Color.green()
-        )
+        success = await self.set_guild_config(ctx.guild.id, 'canal_comando', canal.id)
+        
+        if success:
+            embed = discord.Embed(
+                title="✅ Canal de Comando Definido",
+                description=f"Canal de comandos configurado para: {canal.mention}",
+                color=discord.Color.green()
+            )
+        else:
+            embed = discord.Embed(
+                title="❌ Erro",
+                description="Não foi possível salvar a configuração.",
+                color=discord.Color.red()
+            )
         await ctx.send(embed=embed)
 
     @commands.command(name='configticket')
     @commands.has_permissions(administrator=True)
     async def config_ticket(self, ctx):
-        config = self.get_guild_config(ctx.guild.id)
+        config = await self.get_guild_config(ctx.guild.id)
         
         embed = discord.Embed(
             title="⚙️ Configuração de Tickets",
@@ -188,7 +257,7 @@ class TicketSystem(commands.Cog):
 
         embed.add_field(
             name="Canal de Comando",
-            value=f"<#{canal_comando}>" if canal_comando else "Não configurado",
+            value=f"<#{canal_comando}>" if canal_comando else "❌ Não configurado",
             inline=False
         )
         
@@ -196,7 +265,7 @@ class TicketSystem(commands.Cog):
             categoria = discord.utils.get(ctx.guild.categories, id=categoria_ticket)
             categoria_nome = categoria.name if categoria else "Categoria não encontrada"
         else:
-            categoria_nome = "Não configurada"
+            categoria_nome = "❌ Não configurada"
             
         embed.add_field(
             name="Categoria de Tickets",
@@ -211,6 +280,12 @@ class TicketSystem(commands.Cog):
         )
 
         await ctx.send(embed=embed)
+
+    async def cog_unload(self):
+        """Fecha a conexão com MongoDB quando o cog é descarregado"""
+        if self.client:
+            self.client.close()
+            print("🔌 Conexão com MongoDB fechada")
 
 async def setup(bot):
     await bot.add_cog(TicketSystem(bot))

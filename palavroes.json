@@ -1,5 +1,7 @@
 {
-  "palavroes": [],
+  "palavroes": [
+    "porra"
+  ],
   "configuracoes": {
     "ativo": true,
     "deletar_mensagem": true,

@@ -1,1 +1,9 @@
-{}
+{
+    "1385776928199278703": {
+        "canal_config": 1386386861429096478,
+        "canal_entrada": 1385778592150982788,
+        "canal_saida": 1385778592150982788,
+        "msg_entrada": "👋 Olá {user}, seja bem-vindo(a) ao servidor **Suporte De Venda De Bots**!\n\n📌 Para uma melhor experiência, por favor:\n➡️ Leia atentamente as <#1385777821133312091>  \n❓ Visite o canal <#1385777897213526077> para entender como tudo funciona\n\n📬 Em caso de dúvidas, nossa equipe está à disposição. Aproveite sua estadia!",
+        "msg_saida": "{user} deixou o servidor. 😢  \nEsperamos que tenha tido uma boa experiência. As portas estarão sempre abertas!"
+    }
+}

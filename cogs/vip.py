@@ -1,72 +1,290 @@
 import discord
 from discord.ext import commands, tasks
-import json
 import asyncio
 from datetime import datetime, timedelta
+from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import logging
+
+# Configuração de logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class VIPSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.vip_file = "vip_data.json"
-        self.config_file = "vip_config.json"
-        self.vip_data = self.load_vip_data()
-        self.vip_config = self.load_vip_config()
-        self.check_vip_expiry.start()
+        self.client = None
+        self.db = None
+        self.vip_collection = None
+        self.config_collection = None
+        self._connection_ready = False
+        
+        # Inicializa a conexão com MongoDB
+        self.bot.loop.create_task(self.init_database())
+        
+    async def init_database(self):
+        """Inicializa a conexão com MongoDB"""
+        try:
+            # URL de conexão do MongoDB (vem de variável de ambiente)
+            mongo_uri = os.getenv("MONGO_URI")
+            
+            if not mongo_uri:
+                print("❌ MONGO_URI não encontrada nas variáveis de ambiente!")
+                return
+            
+            print("🔄 Conectando ao MongoDB (VIP System)...")
+            self.client = AsyncIOMotorClient(mongo_uri)
+            
+            # Testa a conexão
+            await self.client.admin.command('ping')
+            
+            self.db = self.client['discord_bot']
+            self.vip_collection = self.db['vip_data']
+            self.config_collection = self.db['vip_config']
+            self._connection_ready = True
+            
+            print("✅ VIP System conectado ao MongoDB com sucesso!")
+            
+            # Cria índices para melhor performance
+            await self.create_indexes()
+            
+            # Inicia loop de verificação
+            if not self.check_vip_expiry.is_running():
+                self.check_vip_expiry.start()
+            
+        except Exception as e:
+            print(f"❌ Erro ao conectar VIP System com MongoDB: {e}")
+            self._connection_ready = False
 
-    def load_vip_data(self):
-        """Carrega dados dos usuários VIP"""
-        if os.path.exists(self.vip_file):
-            try:
-                with open(self.vip_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
+    async def ensure_connection(self):
+        """Garante que a conexão com MongoDB está ativa"""
+        if not self._connection_ready:
+            await self.init_database()
+        return self._connection_ready
 
-    def save_vip_data(self):
-        """Salva dados dos usuários VIP"""
-        with open(self.vip_file, 'w', encoding='utf-8') as f:
-            json.dump(self.vip_data, f, indent=4, ensure_ascii=False)
+    async def create_indexes(self):
+        """Cria índices para melhor performance"""
+        try:
+            # Índice para busca rápida de VIPs por usuário e servidor
+            await self.vip_collection.create_index([
+                ("user_id", 1),
+                ("guild_id", 1)
+            ])
+            
+            # Índice para busca por data de expiração
+            await self.vip_collection.create_index([
+                ("expiry", 1)
+            ])
+            
+            # Índice para configurações por servidor
+            await self.config_collection.create_index([
+                ("guild_id", 1)
+            ])
+            
+            print("📊 Índices VIP MongoDB criados com sucesso!")
+        except Exception as e:
+            print(f"📊 Erro ao criar índices VIP: {e}")
 
-    def load_vip_config(self):
-        """Carrega configurações do VIP"""
-        if os.path.exists(self.config_file):
-            try:
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
+    async def get_vip_data(self, user_id, guild_id):
+        """Obtém dados VIP de um usuário do MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                print("❌ Conexão com MongoDB não está disponível")
+                return None
+                
+            return await self.vip_collection.find_one({
+                "user_id": str(user_id),
+                "guild_id": str(guild_id)
+            })
+            
+        except Exception as e:
+            print(f"❌ Erro ao buscar dados VIP: {e}")
+            return None
 
-    def save_vip_config(self):
-        """Salva configurações do VIP"""
-        with open(self.config_file, 'w', encoding='utf-8') as f:
-            json.dump(self.vip_config, f, indent=4, ensure_ascii=False)
+    async def save_vip_data(self, user_id, guild_id, expiry, added_by):
+        """Salva dados VIP de um usuário no MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                print("❌ Conexão com MongoDB não está disponível")
+                return False
+            
+            user_id = str(user_id)
+            guild_id = str(guild_id)
+            
+            data = {
+                "user_id": user_id,
+                "guild_id": guild_id,
+                "expiry": expiry,
+                "added_by": str(added_by),
+                "added_at": datetime.now()
+            }
+            
+            # Usa upsert para criar ou atualizar
+            result = await self.vip_collection.replace_one(
+                {"user_id": user_id, "guild_id": guild_id},
+                data,
+                upsert=True
+            )
+            
+            print(f"✅ VIP salvo: User {user_id} - Guild {guild_id}")
+            return True
+                
+        except Exception as e:
+            print(f"❌ Erro ao salvar dados VIP: {e}")
+            return False
+
+    async def remove_vip_data(self, user_id, guild_id):
+        """Remove dados VIP de um usuário do MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                print("❌ Conexão com MongoDB não está disponível")
+                return False
+            
+            result = await self.vip_collection.delete_one({
+                "user_id": str(user_id),
+                "guild_id": str(guild_id)
+            })
+            
+            if result.deleted_count > 0:
+                print(f"✅ VIP removido: User {user_id} - Guild {guild_id}")
+                return True
+            else:
+                print(f"⚠️ VIP não encontrado para remoção: User {user_id} - Guild {guild_id}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Erro ao remover dados VIP: {e}")
+            return False
+
+    async def get_vip_config(self, guild_id):
+        """Obtém configurações VIP do servidor do MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                print("❌ Conexão com MongoDB não está disponível")
+                return self.get_default_config(guild_id)
+                
+            config = await self.config_collection.find_one({"guild_id": str(guild_id)})
+            
+            if not config:
+                # Configuração padrão
+                default_config = self.get_default_config(guild_id)
+                await self.save_vip_config(guild_id, default_config)
+                print(f"📋 Configuração VIP padrão criada para Guild {guild_id}")
+                return default_config
+                
+            return config
+            
+        except Exception as e:
+            print(f"❌ Erro ao buscar configuração VIP: {e}")
+            return self.get_default_config(guild_id)
+
+    def get_default_config(self, guild_id):
+        """Retorna configuração padrão"""
+        return {
+            "guild_id": str(guild_id),
+            "multipliers": {
+                "xp": 2.0,
+                "coins": 1.5,
+                "daily": 2.0
+            },
+            "created_at": datetime.now()
+        }
+
+    async def save_vip_config(self, guild_id, config_data):
+        """Salva configurações VIP do servidor no MongoDB"""
+        try:
+            if not await self.ensure_connection():
+                print("❌ Conexão com MongoDB não está disponível")
+                return False
+            
+            guild_id = str(guild_id)
+            config_data["guild_id"] = guild_id
+            config_data["updated_at"] = datetime.now()
+            
+            # Usa upsert para criar ou atualizar
+            result = await self.config_collection.replace_one(
+                {"guild_id": guild_id},
+                config_data,
+                upsert=True
+            )
+            
+            print(f"✅ Configuração VIP salva para Guild {guild_id}")
+            return True
+                
+        except Exception as e:
+            print(f"❌ Erro ao salvar configuração VIP: {e}")
+            return False
 
     async def get_vip_role(self, guild):
         """Obtém o cargo VIP configurado para o servidor"""
-        guild_id = str(guild.id)
-        if guild_id in self.vip_config and 'vip_role_id' in self.vip_config[guild_id]:
-            role_id = self.vip_config[guild_id]['vip_role_id']
+        config = await self.get_vip_config(guild.id)
+        if 'vip_role_id' in config:
+            role_id = config['vip_role_id']
             return guild.get_role(role_id)
         return None
 
     async def is_vip(self, user_id, guild_id):
         """Verifica se um usuário é VIP"""
-        user_key = f"{guild_id}_{user_id}"
-        if user_key in self.vip_data:
-            expiry_date = datetime.fromisoformat(self.vip_data[user_key]['expiry'])
+        vip_data = await self.get_vip_data(user_id, guild_id)
+        if vip_data:
+            expiry_date = vip_data['expiry']
             return datetime.now() < expiry_date
         return False
 
     async def get_vip_multiplier(self, guild_id, type_bonus="xp"):
         """Obtém multiplicador VIP para XP, economia, etc."""
-        guild_id = str(guild_id)
-        if guild_id in self.vip_config:
-            multipliers = self.vip_config[guild_id].get('multipliers', {})
-            return multipliers.get(type_bonus, 1.0)
-        return 1.0
+        config = await self.get_vip_config(guild_id)
+        multipliers = config.get('multipliers', {})
+        return multipliers.get(type_bonus, 1.0)
+
+    @commands.command(name='statusdbvip')
+    @commands.has_permissions(administrator=True)
+    async def status_db_vip(self, ctx):
+        """Verifica o status da conexão com o banco de dados"""
+        if self._connection_ready:
+            try:
+                # Testa a conexão fazendo um ping
+                await self.client.admin.command('ping')
+                
+                # Testa operações básicas
+                await self.vip_collection.find_one({})
+                await self.config_collection.find_one({})
+                
+                embed = discord.Embed(
+                    title="✅ Banco de Dados VIP Conectado",
+                    description="A conexão com o MongoDB está funcionando corretamente.",
+                    color=discord.Color.green()
+                )
+                
+                # Verifica VIPs ativos
+                vip_count = await self.vip_collection.count_documents({
+                    "guild_id": str(ctx.guild.id),
+                    "expiry": {"$gt": datetime.now()}
+                })
+                
+                embed.add_field(
+                    name="📊 Estatísticas",
+                    value=f"VIPs ativos: {vip_count}",
+                    inline=False
+                )
+                
+            except Exception as e:
+                embed = discord.Embed(
+                    title="❌ Erro na Conexão VIP",
+                    description=f"Erro ao testar conexão: {str(e)}",
+                    color=discord.Color.red()
+                )
+                self._connection_ready = False
+        else:
+            embed = discord.Embed(
+                title="❌ Banco de Dados VIP Desconectado",
+                description="A conexão com o MongoDB não está disponível. Tentando reconectar...",
+                color=discord.Color.red()
+            )
+            # Tenta reconectar
+            await self.init_database()
+            
+        await ctx.send(embed=embed)
 
     @commands.command(name='vip')
     @commands.has_permissions(administrator=True)
@@ -83,16 +301,18 @@ class VIPSystem(commands.Cog):
 
         # Calcula data de expiração
         expiry_date = datetime.now() + timedelta(days=dias)
-        user_key = f"{ctx.guild.id}_{member.id}"
         
-        # Salva dados do VIP
-        self.vip_data[user_key] = {
-            'user_id': member.id,
-            'guild_id': ctx.guild.id,
-            'expiry': expiry_date.isoformat(),
-            'added_by': ctx.author.id,
-            'added_at': datetime.now().isoformat()
-        }
+        # Salva dados do VIP no MongoDB
+        success = await self.save_vip_data(member.id, ctx.guild.id, expiry_date, ctx.author.id)
+        
+        if not success:
+            embed = discord.Embed(
+                title="❌ Erro",
+                description="Falha ao salvar VIP no banco de dados!",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+            return
         
         # Adiciona cargo VIP se configurado
         vip_role = await self.get_vip_role(ctx.guild)
@@ -102,14 +322,13 @@ class VIPSystem(commands.Cog):
             except discord.Forbidden:
                 pass
 
-        self.save_vip_data()
-
         embed = discord.Embed(
             title="✅ VIP Adicionado",
             description=f"{member.mention} agora é VIP por **{dias} dias**!",
             color=discord.Color.gold()
         )
         embed.add_field(name="Expira em", value=expiry_date.strftime("%d/%m/%Y às %H:%M"), inline=True)
+        embed.add_field(name="💾 Banco", value="Salvo com sucesso!", inline=True)
         embed.set_thumbnail(url=member.display_avatar.url)
         
         await ctx.send(embed=embed)
@@ -118,9 +337,9 @@ class VIPSystem(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def remove_vip(self, ctx, member: discord.Member):
         """Remove VIP de um usuário"""
-        user_key = f"{ctx.guild.id}_{member.id}"
+        vip_data = await self.get_vip_data(member.id, ctx.guild.id)
         
-        if user_key not in self.vip_data:
+        if not vip_data:
             embed = discord.Embed(
                 title="❌ Erro",
                 description=f"{member.mention} não é VIP!",
@@ -129,8 +348,17 @@ class VIPSystem(commands.Cog):
             await ctx.send(embed=embed)
             return
 
-        # Remove dados do VIP
-        del self.vip_data[user_key]
+        # Remove dados do VIP do MongoDB
+        success = await self.remove_vip_data(member.id, ctx.guild.id)
+        
+        if not success:
+            embed = discord.Embed(
+                title="❌ Erro",
+                description="Falha ao remover VIP do banco de dados!",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+            return
         
         # Remove cargo VIP se configurado
         vip_role = await self.get_vip_role(ctx.guild)
@@ -139,8 +367,6 @@ class VIPSystem(commands.Cog):
                 await member.remove_roles(vip_role)
             except discord.Forbidden:
                 pass
-
-        self.save_vip_data()
 
         embed = discord.Embed(
             title="✅ VIP Removido",
@@ -152,50 +378,33 @@ class VIPSystem(commands.Cog):
 
     @commands.command(name='cargovip')
     @commands.has_permissions(administrator=True)
-    async def set_vip_role(self, ctx, role_id: int):
+    async def set_vip_role(self, ctx, role: discord.Role):
         """Define o cargo VIP do servidor"""
-        role = ctx.guild.get_role(role_id)
-        
-        if not role:
+        # Atualiza configuração no MongoDB
+        config = await self.get_vip_config(ctx.guild.id)
+        config['vip_role_id'] = role.id
+        success = await self.save_vip_config(ctx.guild.id, config)
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Cargo VIP Definido",
+                description=f"Cargo VIP definido como: {role.mention}",
+                color=discord.Color.gold()
+            )
+        else:
             embed = discord.Embed(
                 title="❌ Erro",
-                description="Cargo não encontrado! Verifique o ID.",
+                description="Falha ao salvar configuração no banco!",
                 color=discord.Color.red()
             )
-            await ctx.send(embed=embed)
-            return
-
-        guild_id = str(ctx.guild.id)
-        if guild_id not in self.vip_config:
-            self.vip_config[guild_id] = {}
-        
-        self.vip_config[guild_id]['vip_role_id'] = role_id
-        self.save_vip_config()
-
-        embed = discord.Embed(
-            title="✅ Cargo VIP Definido",
-            description=f"Cargo VIP definido como: {role.mention}",
-            color=discord.Color.gold()
-        )
         
         await ctx.send(embed=embed)
 
     @commands.command(name='configvip')
     @commands.has_permissions(administrator=True)
     async def config_vip(self, ctx):
-        """Configura multiplicadores e vantagens VIP"""
-        guild_id = str(ctx.guild.id)
-        
-        if guild_id not in self.vip_config:
-            self.vip_config[guild_id] = {
-                'multipliers': {
-                    'xp': 2.0,
-                    'coins': 1.5,
-                    'daily': 2.0
-                }
-            }
-        
-        config = self.vip_config[guild_id]
+        """Mostra configurações VIP atuais"""
+        config = await self.get_vip_config(ctx.guild.id)
         vip_role = await self.get_vip_role(ctx.guild)
         
         embed = discord.Embed(
@@ -204,9 +413,17 @@ class VIPSystem(commands.Cog):
             color=discord.Color.gold()
         )
         
+        # Status da conexão
+        status_emoji = "✅" if self._connection_ready else "❌"
+        embed.add_field(
+            name="💾 Banco de Dados",
+            value=f"{status_emoji} {'Conectado' if self._connection_ready else 'Desconectado'}",
+            inline=True
+        )
+        
         # Cargo VIP
         role_text = vip_role.mention if vip_role else "❌ Não configurado"
-        embed.add_field(name="🎭 Cargo VIP", value=role_text, inline=False)
+        embed.add_field(name="🎭 Cargo VIP", value=role_text, inline=True)
         
         # Multiplicadores
         multipliers = config.get('multipliers', {})
@@ -221,59 +438,75 @@ class VIPSystem(commands.Cog):
         )
         
         # VIPs ativos
-        active_vips = 0
-        for key, data in self.vip_data.items():
-            if str(data['guild_id']) == guild_id:
-                expiry = datetime.fromisoformat(data['expiry'])
-                if datetime.now() < expiry:
-                    active_vips += 1
+        try:
+            active_vips = await self.vip_collection.count_documents({
+                "guild_id": str(ctx.guild.id),
+                "expiry": {"$gt": datetime.now()}
+            })
+        except:
+            active_vips = "Erro"
         
         embed.add_field(name="👑 VIPs Ativos", value=str(active_vips), inline=True)
         
         # Como usar
         embed.add_field(
-            name="📝 Como configurar",
-            value="Use `!cargovip <ID>` para definir o cargo VIP\n"
-                  "Use `!vip @user <dias>` para dar VIP\n"
-                  "Use `!removervip @user` para remover VIP",
+            name="📝 Comandos Disponíveis",
+            value="`!cargovip @cargo` - Definir cargo VIP\n"
+                  "`!vip @user <dias>` - Adicionar VIP\n"
+                  "`!removervip @user` - Remover VIP\n"
+                  "`!statusdbvip` - Testar banco de dados",
             inline=False
         )
         
-        self.save_vip_config()
         await ctx.send(embed=embed)
 
     @commands.command(name='listvip')
     @commands.has_permissions(administrator=True)
     async def list_vip(self, ctx):
         """Lista todos os VIPs ativos do servidor"""
-        guild_id = str(ctx.guild.id)
-        active_vips = []
-        
-        for key, data in self.vip_data.items():
-            if str(data['guild_id']) == guild_id:
-                expiry = datetime.fromisoformat(data['expiry'])
-                if datetime.now() < expiry:
-                    user = self.bot.get_user(data['user_id'])
-                    if user:
-                        days_left = (expiry - datetime.now()).days
-                        active_vips.append(f"{user.mention} - **{days_left} dias**")
-        
-        if not active_vips:
-            embed = discord.Embed(
-                title="👑 Lista VIP",
-                description="Nenhum VIP ativo no servidor.",
-                color=discord.Color.gold()
-            )
-        else:
-            vip_list = "\n".join(active_vips[:10])  # Máximo 10 por página
-            embed = discord.Embed(
-                title="👑 Lista VIP",
-                description=vip_list,
-                color=discord.Color.gold()
-            )
+        try:
+            # Busca VIPs ativos no MongoDB
+            cursor = self.vip_collection.find({
+                "guild_id": str(ctx.guild.id),
+                "expiry": {"$gt": datetime.now()}
+            }).limit(10)
             
-            if len(active_vips) > 10:
-                embed.set_footer(text=f"Mostrando 10 de {len(active_vips)} VIPs")
+            active_vips = []
+            async for vip_data in cursor:
+                user = self.bot.get_user(int(vip_data['user_id']))
+                if user:
+                    days_left = (vip_data['expiry'] - datetime.now()).days
+                    active_vips.append(f"{user.mention} - **{days_left} dias**")
+            
+            if not active_vips:
+                embed = discord.Embed(
+                    title="👑 Lista VIP",
+                    description="Nenhum VIP ativo no servidor.",
+                    color=discord.Color.gold()
+                )
+            else:
+                vip_list = "\n".join(active_vips)
+                embed = discord.Embed(
+                    title="👑 Lista VIP",
+                    description=vip_list,
+                    color=discord.Color.gold()
+                )
+                
+                total_vips = await self.vip_collection.count_documents({
+                    "guild_id": str(ctx.guild.id),
+                    "expiry": {"$gt": datetime.now()}
+                })
+                
+                if total_vips > 10:
+                    embed.set_footer(text=f"Mostrando 10 de {total_vips} VIPs")
+        
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ Erro",
+                description="Erro ao buscar VIPs no banco de dados!",
+                color=discord.Color.red()
+            )
+            print(f"❌ Erro ao listar VIPs: {e}")
         
         await ctx.send(embed=embed)
 
@@ -283,28 +516,21 @@ class VIPSystem(commands.Cog):
         if not member:
             member = ctx.author
             
-        user_key = f"{ctx.guild.id}_{member.id}"
+        vip_data = await self.get_vip_data(member.id, ctx.guild.id)
         
-        if user_key in self.vip_data:
-            expiry = datetime.fromisoformat(self.vip_data[user_key]['expiry'])
-            if datetime.now() < expiry:
-                days_left = (expiry - datetime.now()).days
-                hours_left = (expiry - datetime.now()).seconds // 3600
-                
-                embed = discord.Embed(
-                    title="👑 Status VIP",
-                    description=f"{member.mention} é **VIP**!",
-                    color=discord.Color.gold()
-                )
-                embed.add_field(name="Expira em", value=f"{days_left} dias e {hours_left} horas", inline=True)
-                embed.add_field(name="Data de expiração", value=expiry.strftime("%d/%m/%Y às %H:%M"), inline=True)
-                embed.set_thumbnail(url=member.display_avatar.url)
-            else:
-                embed = discord.Embed(
-                    title="❌ Status VIP",
-                    description=f"{member.mention} não é VIP.",
-                    color=discord.Color.red()
-                )
+        if vip_data and datetime.now() < vip_data['expiry']:
+            expiry = vip_data['expiry']
+            days_left = (expiry - datetime.now()).days
+            hours_left = (expiry - datetime.now()).seconds // 3600
+            
+            embed = discord.Embed(
+                title="👑 Status VIP",
+                description=f"{member.mention} é **VIP**!",
+                color=discord.Color.gold()
+            )
+            embed.add_field(name="Expira em", value=f"{days_left} dias e {hours_left} horas", inline=True)
+            embed.add_field(name="Data de expiração", value=expiry.strftime("%d/%m/%Y às %H:%M"), inline=True)
+            embed.set_thumbnail(url=member.display_avatar.url)
         else:
             embed = discord.Embed(
                 title="❌ Status VIP",
@@ -317,31 +543,41 @@ class VIPSystem(commands.Cog):
     @tasks.loop(hours=1)
     async def check_vip_expiry(self):
         """Verifica VIPs expirados a cada hora"""
-        expired_keys = []
-        
-        for key, data in self.vip_data.items():
-            expiry = datetime.fromisoformat(data['expiry'])
-            if datetime.now() >= expiry:
-                expired_keys.append(key)
+        try:
+            if not self._connection_ready:
+                return
+                
+            # Busca VIPs expirados no MongoDB
+            expired_vips = []
+            cursor = self.vip_collection.find({
+                "expiry": {"$lte": datetime.now()}
+            })
+            
+            async for vip_data in cursor:
+                expired_vips.append(vip_data)
                 
                 # Remove cargo VIP se possível
                 try:
-                    guild = self.bot.get_guild(data['guild_id'])
+                    guild = self.bot.get_guild(int(vip_data['guild_id']))
                     if guild:
-                        member = guild.get_member(data['user_id'])
+                        member = guild.get_member(int(vip_data['user_id']))
                         vip_role = await self.get_vip_role(guild)
                         
                         if member and vip_role and vip_role in member.roles:
                             await member.remove_roles(vip_role)
+                            print(f"Cargo VIP removido de {member.name} (expirado)")
                 except:
                     pass  # Ignora erros de permissão
-        
-        # Remove VIPs expirados
-        for key in expired_keys:
-            del self.vip_data[key]
-        
-        if expired_keys:
-            self.save_vip_data()
+            
+            # Remove VIPs expirados do MongoDB
+            if expired_vips:
+                result = await self.vip_collection.delete_many({
+                    "expiry": {"$lte": datetime.now()}
+                })
+                print(f"Removidos {result.deleted_count} VIPs expirados")
+                
+        except Exception as e:
+            print(f"❌ Erro ao verificar VIPs expirados: {e}")
 
     @check_vip_expiry.before_loop
     async def before_check_vip_expiry(self):
@@ -374,6 +610,7 @@ class VIPSystem(commands.Cog):
     @remove_vip.error
     @set_vip_role.error
     @config_vip.error
+    @status_db_vip.error
     async def vip_error_handler(self, ctx, error):
         if isinstance(error, commands.MissingPermissions):
             embed = discord.Embed(
@@ -396,6 +633,15 @@ class VIPSystem(commands.Cog):
                 color=discord.Color.red()
             )
             await ctx.send(embed=embed)
+
+    async def cog_unload(self):
+        """Cleanup quando o cog é descarregado"""
+        if self.check_vip_expiry.is_running():
+            self.check_vip_expiry.cancel()
+        
+        if self.client:
+            self.client.close()
+            print("🔌 Conexão VIP System com MongoDB fechada")
 
 async def setup(bot):
     await bot.add_cog(VIPSystem(bot))
