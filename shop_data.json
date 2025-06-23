@@ -1,0 +1,18 @@
+{
+  "smartphone": {
+    "price": 1500,
+    "desc": "Smartphone moderno"
+  },
+  "notebook": {
+    "price": 3000,
+    "desc": "Notebook para trabalho"
+  },
+  "carro": {
+    "price": 50000,
+    "desc": "Carro popular"
+  },
+  "casa": {
+    "price": 200000,
+    "desc": "Casa própria"
+  }
+}
