@@ -1,4 +1,3 @@
-
 import discord
 from discord.ext import commands
 
@@ -123,7 +122,9 @@ class Ajuda(commands.Cog):
 
         embed.add_field(name="📡 Status", value=(
             "`!statusmodo`\n"
-            "`!listarstatus`"
+            "`!listarstatus`\n"
+            "`!statusintervalo <minutos>`\n"
+            "`!statusmanual`"
         ), inline=False)
 
         embed.set_footer(text="Use os comandos com ! no início. Ex: !ping")
