@@ -1,26 +1,24 @@
-# Usa imagem Python oficial como base
-FROM python:3.11-slim
+FROM debian:bullseye-slim
 
-# Instala dependências do sistema (incluindo OpenSSL e certificados)
+# Instalar dependências do sistema
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    gcc \
-    libssl-dev \
-    ca-certificates \
-    openssl \
-    && rm -rf /var/lib/apt/lists/*
+    python3 python3-pip python3-venv \
+    build-essential libssl-dev libffi-dev \
+    curl ca-certificates openssl \
+ && rm -rf /var/lib/apt/lists/*
 
-# Define diretório de trabalho
+# Diretório de trabalho
 WORKDIR /app
 
-# Copia os arquivos do projeto
+# Copiar arquivos
 COPY . .
 
-# Instala dependências do Python
-RUN pip install --no-cache-dir -r requirements.txt
+# Instalar dependências do projeto
+RUN pip3 install --upgrade pip
+RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Expõe a porta usada pelo Flask
+# Expor porta para Flask
 EXPOSE 10000
 
-# Comando de inicialização do bot
-CMD ["python", "main.py"]
+# Iniciar o bot
+CMD ["python3", "main.py"]
