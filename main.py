@@ -1,57 +1,51 @@
+import os
 import discord
 from discord.ext import commands
-import os
-import threading
 from flask import Flask
-import requests
+import asyncio
 
-# === Variáveis de ambiente ===
-TOKEN = os.getenv("TOKEN")         # Token do bot (defina no Render)
-AUTOPING_URL = os.getenv("AUTOPING")  # URL para o Render dar ping no seu bot
+TOKEN = os.getenv("TOKEN")
+AUTOPING = os.getenv("AUTOPING")
 
-# === Inicialização do Flask ===
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "NatanBot está online!"
-
-def manter_online():
-    app.run(host="0.0.0.0", port=10000)
-
-# === Inicialização do Bot Discord ===
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Evento on_ready
-@bot.event
-async def on_ready():
-    print(f"🤖 Bot conectado como {bot.user}")
+# Auto Ping Flask
+app = Flask(__name__)
 
-# Carregamento automático dos Cogs na pasta ./cogs
-@bot.event
-async def setup_hook():
-    for filename in os.listdir('./cogs'):
-        if filename.endswith('.py'):
-            await bot.load_extension(f'cogs.{filename[:-3]}')
-    print("✅ Todos os cogs carregados.")
+@app.route('/')
+def home():
+    return "Bot está rodando!"
 
-# Ping automático para manter o bot vivo no Render
 async def auto_ping():
-    await bot.wait_until_ready()
-    if AUTOPING_URL:
-        while not bot.is_closed():
-            try:
-                requests.get(AUTOPING_URL)
-                print("🔁 Autoping enviado.")
-            except Exception as e:
-                print(f"❌ Falha no autoping: {e}")
-            await discord.utils.sleep_until(discord.utils.utcnow() + discord.utils.timedelta(minutes=14))
+    import aiohttp
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.get(AUTOPING)
+        except Exception as e:
+            print(f"[autoping] Erro: {e}")
+        await asyncio.sleep(300)  # a cada 5 minutos
 
-# Rodar Flask em paralelo
-threading.Thread(target=manter_online).start()
+# Substitui o antigo create_task no topo
+class CustomBot(commands.Bot):
+    async def setup_hook(self):
+        # Carregar todos os cogs automaticamente
+        for filename in os.listdir("./cogs"):
+            if filename.endswith(".py"):
+                await self.load_extension(f"cogs.{filename[:-3]}")
+        # Rodar tarefa de autoping
+        self.loop.create_task(auto_ping())
 
-# Iniciar autoping e rodar o bot
+# Substitui a instância antiga
+bot = CustomBot(command_prefix="!", intents=intents)
+
 if __name__ == "__main__":
-    bot.loop.create_task(auto_ping())
-    bot.run(TOKEN)
+    import threading
+
+    # Flask roda em uma thread separada
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
+
+    # Roda o bot com asyncio
+    import asyncio
+    asyncio.run(bot.start(TOKEN))
