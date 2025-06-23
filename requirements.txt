@@ -3,4 +3,5 @@ Flask
 aiohttp
 psutil
 python-dotenv
-motor
+pymongo[srv]==4.6.1
+motor==3.3.2
